@@ -3,9 +3,10 @@
 
 from sentencepiece import SentencePieceProcessor
 from logging import getLogger
-from typing import List
+from typing import Dict, List
 import os
 import torch
+from typing import List, Tuple, Dict, Optional
 
 logger = getLogger()
 
@@ -39,7 +40,11 @@ class Tokenizer:
             t = t + [self.eos_id]
         return t
 
-    def encode_vqa(self, text=None, max_feats=10, split='train', answer_mapping=None, answer=None) -> List[int]:
+    def encode_vqa(self, text: Optional[Dict[str, str]] = None,
+                    max_feats: int = 10,
+                    split: str = 'train', 
+                    answer_mapping: Optional[Dict[int, str]] = None, 
+                    answer: Optional[int] = None) -> Tuple[List[int], int, int]:
         i_text = "Instruction: Predict the answer based on the video and question.\n"
         q_text = text['q_text']
         o_text = text['o_text']
@@ -63,33 +68,78 @@ class Tokenizer:
                 t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
             prefix_index = t[answer].index(self.a_token_id) + 5
         return t, prefix_index, video_start
+    
+    def encode_vaq(self, text: Optional[Dict[str, str]] = None,
+                max_feats: int = 10,
+                split: str = 'train', 
+                answer_mapping: Optional[Dict[int, str]] = None, 
+                answer: Optional[int] = None,
+                verbose_print=False) -> Tuple[List[int], int, int]:
+        
+        if verbose_print:
+            # Phrases to be tokenized and encoded
+            phrases = ["Instruction:", "Question:","\nQuestion:", "Video:", "Answer:", "answer:", "Choices:", "video", 
+                    "The answer is", ":", "A", "B", "C", "D", "E", "(A)", "(B)", "(C)", "(D)", "(E)", "(", ")"]
 
-    def encode_vaq(self, text=None, max_feats=10, split='train', answer_mapping=None, answer=None) -> List[int]:
+            # Printing the tokenized and encoded versions of the phrases
+            print("\nTokenized and Encoded Phrases:")
+            for phrase in phrases:
+                encoded_phrase = self.sp_model.encode(phrase)
+                print(f"'{phrase}': {encoded_phrase}")
+        
         i_text = "Instruction: Predict the question based on the video and answer.\n"
         q_text = text['q_text'].strip()
         o_text = text['o_text']
         a_text = text['a_text']
-        
+
+        if verbose_print:
+            print("Original Texts:")
+            print("Instruction Text:", i_text)
+            print("Q Text:", q_text)
+            print("O Text:", o_text)
+            print("A Text:", a_text)
+
         s1 = i_text + 'Video:'
         t1 = [self.bos_id] + self.sp_model.encode(s1)
         video_start = len(t1)
-        
+
+        if verbose_print:
+            print("\nAfter initial encoding:")
+            print("Encoded S1 (Initial part):", s1, "=>", t1)
+
         s2 = o_text + a_text
-        
+
         if split == 'train':
             s2 = s2 + answer_mapping[answer] + "\n" + q_text
             t2 = self.sp_model.encode(s2) + [self.eos_id]
             t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
             prefix_index = t[0].index(self.q_token_id) + 2
+
+            if verbose_print:
+                print("\nEncoded S2 (Train Split):", s2, "=>", t2)
+                print("Final Token Sequence (Train):", t)
         else:
             t = []
             for k, v in answer_mapping.items():
-                t2 = self.sp_model.encode(s2 + v + "\n" + q_text) + [self.eos_id]
+                temp_s2 = s2 + v + "\n" + q_text
+                t2 = self.sp_model.encode(temp_s2) + [self.eos_id]
                 t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
+
+                if verbose_print:
+                    print("\nEncoded S2 (Other Split):", temp_s2, "=>", t2)
+                    print("Final Token Sequence (Other):", t[-1])
+
             prefix_index = t[answer].index(self.q_token_id) + 2
+
+        if verbose_print:
+            print("Prefix Index:", prefix_index)
+            print("Video Start:", video_start)
+
         return t, prefix_index, video_start
+
+
     
-    def encode_qav(self, text=None, max_feats=10, split='train', answer_mapping=None, answer=None) -> List[int]:
+    def encode_qav(self, text: Optional[Dict[str, str]] = None, max_feats: int = 10, split: str = 'train', answer_mapping: Optional[Dict[int, str]] = None, answer: Optional[int] = None) -> Tuple[List[int], int]:
         i_text = "Instruction: Predict the video based on the question and answer.\n"
         q_text = text['q_text']
         o_text = text['o_text']

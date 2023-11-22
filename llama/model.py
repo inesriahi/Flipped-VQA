@@ -13,7 +13,7 @@ from torch.nn import Embedding, Linear
 import torch
 
 @dataclass
-class ModelArgs:
+class ModelArgs: # check how they are set again in llama_vqa.py
     dim: int = 512
     n_layers: int = 8
     n_heads: int = 8
@@ -275,8 +275,8 @@ class Transformer(nn.Module):
             qav_loss = self.qav_criterion(qav_output / self.tau, qav_label)
         
         if inference:
-            logits = self.inference_criterion(vqa_output, vqa_label)
-            logits = logits.reshape(bsz, n_options, -1)
-            return logits
+            individual_losses = self.inference_criterion(vqa_output, vqa_label)
+            individual_losses = individual_losses.reshape(bsz, n_options, -1)
+            return individual_losses
         else:
             return vqa_loss, vaq_loss, qav_loss

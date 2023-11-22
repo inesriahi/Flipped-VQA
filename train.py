@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn
+import torch.distributed as dist
 
 import timm
 import timm.optim.optim_factory as optim_factory
@@ -74,7 +75,7 @@ def main(args):
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
 
-    device = torch.device(args.device)
+    device = torch.device("cuda", args.gpu)
 
     # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()

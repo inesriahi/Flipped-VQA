@@ -1,9 +1,10 @@
+from typing import Any, Dict, Tuple
 import torch
 from .base_dataset import BaseDataset
 import pandas as pd
 
 class NextQA(BaseDataset):
-    def __init__(self, args=None, tokenizer=None, split='train'):
+    def __init__(self, args: Any = None, tokenizer: Any = None, split: str = 'train') -> None:
         super().__init__(args, tokenizer, split)
         self.data = pd.read_csv(f'./data/nextqa/{split}.csv')
         self.features = torch.load(f'./data/{args.dataset}/clipvitl14.pth')
@@ -12,7 +13,7 @@ class NextQA(BaseDataset):
         self.qtype_mapping = {'CH': 1, 'CW': 2, 'TN': 3, 'TC': 4, 'TP': 5, 'DL': 6, 'DC': 7, 'DO': 8}
         print(f"Num {split} data: {len(self.data)}")
         
-    def _get_text(self, idx):
+    def _get_text(self, idx: int) -> Dict[str, str]:
         question = self.data["question"].values[idx].capitalize().strip()
         if question[-1] != "?":
             question = str(question) + "?"
@@ -28,7 +29,7 @@ class NextQA(BaseDataset):
         text = {'q_text': q_text, 'o_text': o_text, 'a_text': a_text, 'options': options}
         return text
 
-    def _get_video(self, video_id):
+    def _get_video(self, video_id: str) -> Tuple[torch.Tensor, int]:
         if video_id not in self.features:
             print(video_id)
             video = torch.zeros(1, self.features_dim)
@@ -48,11 +49,11 @@ class NextQA(BaseDataset):
 
         return video, video_len
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         vid = self.data['video'].values[idx]
         qtype = self.qtype_mapping[self.data['type'].values[idx]]
-        answer = self.data['answer'].values[idx]
-        text = self._get_text(idx)
+        answer:int = self.data['answer'].values[idx]
+        text:Dict[str, str] = self._get_text(idx) # The answer itself is not included yet
         text_id, label, video_start, video_index, label_mask = self._get_text_token(text, answer)
         video, video_len = self._get_video(f'{vid}')
         return {"vid": vid, "video": video, "video_len": video_len, "text": text, "text_id": text_id, "label": label, "video_start": video_start,

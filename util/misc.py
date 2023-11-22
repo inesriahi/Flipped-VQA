@@ -15,134 +15,151 @@ import os
 import time
 from collections import defaultdict, deque
 from pathlib import Path
+from typing import Any, Deque, Dict, Iterable, List, Optional, Callable
+from dataclasses import dataclass, field
 
 import torch
 import torch.distributed as dist
 from torch import inf
 
-
-class SmoothedValue(object):
-    """Track a series of values and provide access to smoothed values over a
-    window or the global series average.
+@dataclass
+class SmoothedValue:
     """
+    Track and provide access to smoothed values over a window or the global series average.
 
-    def __init__(self, window_size=20, fmt=None):
-        if fmt is None:
-            fmt = "{median:.4f} ({global_avg:.4f})"
-        self.deque = deque(maxlen=window_size)
-        self.total = 0.0
-        self.count = 0
-        self.fmt = fmt
+    Attributes:
+        window_size (int): Size of the window for calculating smoothed values. Default is 20.
+        fmt (str, optional): Format string for output. Defaults to "{median:.4f} ({global_avg:.4f})".
 
-    def update(self, value, n=1):
-        self.deque.append(value)
+    Example:
+        smoothed_value = SmoothedValue(window_size=30)
+        for value in data:
+            smoothed_value.update(value)
+        print(smoothed_value)
+    """
+    window_size: int = 20
+    fmt: Optional[str] = "{median:.4f} ({global_avg:.4f})"
+    _deque: Deque[float] = field(default_factory=lambda: deque(maxlen=20))
+    total: float = 0.0
+    count: int = 0
+
+    def __post_init__(self):
+        self._deque = deque(maxlen=self.window_size) # The maxlen attribute ensures that the deque only holds a maximum of window_size elements
+        if self.fmt is None:
+            self.fmt = "{median:.4f} ({global_avg:.4f})"
+
+    def update(self, value: float, n: int =1) -> None:
+        self._deque.append(value)
         self.count += n
         self.total += value * n
 
     def synchronize_between_processes(self):
         """
+        This method ensures that the count and total attributes of the SmoothedValue instances are synchronized across all processes in distributed learning environment
         Warning: does not synchronize the deque!
         """
-        if not is_dist_avail_and_initialized():
+        if not is_dist_avail_and_initialized(): # This line checks if the distributed environment is available and initialized. If it's not, the method simply returns without doing anything
             return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
-        dist.barrier()
-        dist.all_reduce(t)
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda') # The tensor is created on the CUDA device (GPU), assuming the environment supports CUDA. This is important for performance in distributed training scenarios. 
+        dist.barrier() #  This is a synchronization point. It ensures that all processes reach this point before any of them proceeds. This is important to ensure that all processes perform the following all_reduce operation together.
+        dist.all_reduce(t) # This is the key step for synchronization. The all_reduce operation aggregates the tensors across all processes by applying a specified operation (by default, the sum). After this operation, each process will have the sum of count and total from all processes.
         t = t.tolist()
-        self.count = int(t[0])
+        self.count = int(t[0]) # The local count and total attributes are updated based on the aggregated values. The count is converted to an integer.
         self.total = t[1]
 
     @property
-    def median(self):
-        d = torch.tensor(list(self.deque))
+    def median(self) -> float:
+        d = torch.tensor(list(self._deque))
         return d.median().item()
 
     @property
-    def avg(self):
-        d = torch.tensor(list(self.deque), dtype=torch.float32)
+    def avg(self) -> float: # The avg represents the average of a sliding window of the most recent values.
+        d = torch.tensor(list(self._deque), dtype=torch.float32)
         return d.mean().item()
 
     @property
-    def global_avg(self):
+    def global_avg(self) -> float: # this average is computed using the total sum of all the values
         return self.total / self.count
 
     @property
-    def max(self):
-        return max(self.deque)
+    def max(self) -> float:
+        return max(self._deque)
 
     @property
-    def value(self):
-        return self.deque[-1]
+    def value(self) -> float:
+        return self._deque[-1]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.fmt.format(median=self.median, avg=self.avg, global_avg=self.global_avg, max=self.max, value=self.value)
 
 
-class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+class MetricLogger:
+    def __init__(self, delimiter: str = "\t") -> None:
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
 
-    def update(self, n=1, **kwargs):
-        for k, v in kwargs.items():
-            if v is None:
+    def update(self, count = 1, **metrics):
+        for metric_name, value in metrics.items():
+            if value is None:
                 continue
-            if isinstance(v, torch.Tensor):
-                v = v.item()
-            assert isinstance(v, (float, int))
-            self.meters[k].update(v, n=n)
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            assert isinstance(value, (float, int))
+            self.meters[metric_name].update(value, n=count)
 
-    def __getattr__(self, attr):
-        if attr in self.meters:
-            return self.meters[attr]
-        if attr in self.__dict__:
-            return self.__dict__[attr]
-        raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, attr))
+    def __getattr__(self, name: str) -> Any:
+        if name in self.meters:
+            return self.meters[name]
+        return super().__getattr__(name)
 
-    def __str__(self):
-        loss_str = []
-        for name, meter in self.meters.items():
-            loss_str.append("{}: {}".format(name, str(meter)))
-        return self.delimiter.join(loss_str)
+    def __str__(self) -> str:
+        metric_str = [f"{name}: {meter}" for name, meter in self.meters.items()]
+        return self.delimiter.join(metric_str)
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self) -> None:
         for meter in self.meters.values():
             meter.synchronize_between_processes()
 
-    def add_meter(self, name, meter):
+    def add_meter(self, name: str, meter: SmoothedValue) -> None:
         self.meters[name] = meter
 
     def log_every(self, iterable, print_freq, header=None):
-        i = 0
+        index = 0
         if not header:
             header = ''
         start_time = time.time()
         end = time.time()
         iter_time = SmoothedValue(fmt='{avg:.4f}')
         data_time = SmoothedValue(fmt='{avg:.4f}')
-        space_fmt = ':' + str(len(str(len(iterable)))) + 'd'
-        log_msg = [header, '[{0' + space_fmt + '}/{1}]', 'eta: {eta}', '{meters}', 'time: {time}', 'data: {data}']
-        if torch.cuda.is_available():
-            log_msg.append('max mem: {memory:.0f}')
-        log_msg = self.delimiter.join(log_msg)
+        num_digits = len(str(len(iterable)))
+        space_fmt = f':{num_digits}d'
+        log_msg = self._construct_log_msg(space_fmt, header, len(iterable))
         MB = 1024.0 * 1024.0
-        for obj in iterable:
+        for item in iterable:
             data_time.update(time.time() - end)
-            yield obj
+            yield item
             iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print(log_msg.format(i, len(iterable), eta=eta_string, meters=str(self), time=str(iter_time), data=str(data_time), memory=torch.cuda.max_memory_allocated() / MB))
-                else:
-                    print(log_msg.format(i, len(iterable), eta=eta_string, meters=str(self), time=str(iter_time), data=str(data_time)))
-            i += 1
+            if index % print_freq == 0 or index == len(iterable) - 1:
+                self._print_log(index, iterable, iter_time, data_time, log_msg, MB)
+            index += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(header, total_time_str, total_time / len(iterable)))
+        print(f'{header} Total time: {total_time_str} ({total_time / len(iterable):.4f} s / it)')
 
+    def _construct_log_msg(self, space_fmt: str, header: str, total: int) -> str:
+        log_msg = [header, f'[{space_fmt}/{total}]', 'eta: {eta}', '{meters}', 'time: {time}', 'data: {data}']
+        if torch.cuda.is_available():
+            log_msg.append('max mem: {memory:.0f}')
+        return self.delimiter.join(log_msg)
+
+    def _print_log(self, index: int, iterable: Iterable, iter_time: SmoothedValue, data_time: SmoothedValue, log_msg: str, MB: float) -> None:
+        eta_seconds = iter_time.global_avg * (len(iterable) - index)
+        eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+        if torch.cuda.is_available():
+            print(log_msg.format(index, len(iterable), eta=eta_string, meters=str(self), time=str(iter_time), data=str(data_time), memory=torch.cuda.max_memory_allocated() / MB))
+        else:
+            print(log_msg.format(index, len(iterable), eta=eta_string, meters=str(self), time=str(iter_time), data=str(data_time)))
 
 def setup_for_distributed(is_master):
     """
@@ -219,7 +236,7 @@ def init_distributed_mode(args):
     args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}, gpu {}'.format(args.rank, args.dist_url, args.gpu), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
-    torch.distributed.barrier()
+    # torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
 
@@ -309,48 +326,86 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             print("With optim & sched!")
 
 
-def all_reduce_mean(x):
+def all_reduce_mean(value: float) -> float:
+    """
+    Computes the average of a value across all nodes in a distributed system.
+
+    This function takes a numeric value, synchronizes it across all nodes in the
+    distributed system using a reduction operation, and then computes the average.
+
+    Args:
+        value (float): The value to be averaged across nodes.
+
+    Returns:
+        float: The average of the input value across all nodes.
+    """
     world_size = get_world_size()
-    if world_size > 1:
-        x_reduce = torch.tensor(x).cuda()
-        dist.all_reduce(x_reduce)
-        x_reduce /= world_size
-        return x_reduce.item()
-    else:
-        return x
+    if world_size <= 1:
+        return value
+    reduced_value = torch.tensor(value).cuda()
+    dist.all_reduce(reduced_value)
+    average_value = reduced_value / world_size
+    return average_value.item()
 
 
 def getCount(freq):
     count, total = freq[0], freq[1]
     return count / total if total != 0 else 0.0
 
-def log_qtype(data, eval, metric_logger, args):
-    ep = 1e-10
-    
-    if args.dataset == 'nextqa':
-        qtype2id= {'CH': 1, 'CW': 2, 'TN': 3, 'TC': 4, 'TP': 5, 'DL': 6, 'DC': 7, 'DO': 8}
-    elif args.dataset == "star":
-        qtype2id= {'In': 1, 'Seq': 2, 'Pre': 3, 'Feas': 4}
+def get_qtype_mapping(dataset_name: str) -> Dict[str, int]:
+    if dataset_name == 'nextqa':
+        return {'CH': 1, 'CW': 2, 'TN': 3, 'TC': 4, 'TP': 5, 'DL': 6, 'DC': 7, 'DO': 8}
+    elif dataset_name == "star":
+        return {'In': 1, 'Seq': 2, 'Pre': 3, 'Feas': 4}
     else:
-        return
-        
-    q_freq = {i : [0., 0.] for i in qtype2id.values()}
-    q_freq[0] = [0., 0.]
+        return {}
+
+def calculate_question_frequency(data, eval, qtype2id: Dict[str, int]) -> Dict[int, List[float]]:
+    q_freq = {id: [0.0, 0.0] for id in qtype2id.values()}
+    q_freq[0] = [0.0, 0.0]
     for i, v in enumerate(eval):
         qt = data['qtype'][i].item()
         q_freq[qt][0] += v.item()
         q_freq[qt][1] += 1
         q_freq[0][0] += v.item()
         q_freq[0][1] += 1
-    
-    if args.dataset == 'nextqa':
-        metric_logger.update(n=(q_freq[1][1]+q_freq[2][1]+ ep), C=(q_freq[1][0]+q_freq[2][0]) / (q_freq[1][1]+q_freq[2][1]+ ep))
-        metric_logger.update(n=(q_freq[3][1]+q_freq[4][1]+ q_freq[5][1]+ ep), T=(q_freq[3][0]+q_freq[4][0]+q_freq[5][0]) / (q_freq[3][1]+q_freq[4][1]+ q_freq[5][1]+ ep))
-        metric_logger.update(n=(q_freq[6][1]+q_freq[7][1]+ q_freq[8][1]+ ep), D=(q_freq[6][0]+q_freq[7][0]+q_freq[8][0]) / (q_freq[6][1]+q_freq[7][1]+ q_freq[8][1]+ ep))
-        metric_logger.update(n=q_freq[0][1]+ep, Total=getCount(q_freq[0]))
-    elif args.dataset == "star":
-        metric_logger.update(n=q_freq[1][1]+ep, In=getCount(q_freq[1]))
-        metric_logger.update(n=q_freq[2][1]+ep, Seq=getCount(q_freq[2]))
-        metric_logger.update(n=q_freq[3][1]+ep, Pre=getCount(q_freq[3]))
-        metric_logger.update(n=q_freq[4][1]+ep, Feas=getCount(q_freq[4]))
-        metric_logger.update(n=q_freq[0][1]+ep, Total=getCount(q_freq[0]))
+    return q_freq
+
+def update_metrics_based_on_dataset(q_freq, metric_logger: MetricLogger, dataset_name: str, epsilon: float) -> None:
+    """
+    Updates the metrics based on the specific dataset.
+
+    Args:
+        q_freq: Dictionary containing the frequencies of different question types.
+        metric_logger: Logger for recording metrics.
+        dataset_name: Name of the dataset (e.g., 'nextqa', 'star').
+        epsilon: A small number to avoid division by zero.
+    """
+    if dataset_name == 'nextqa':
+        update_nextqa_metrics(q_freq, metric_logger, epsilon)
+    elif dataset_name == "star":
+        update_star_metrics(q_freq, metric_logger, epsilon)
+
+def update_nextqa_metrics(q_freq, metric_logger, epsilon: float) -> None:
+    # Logic specific to the 'nextqa' dataset
+    metric_logger.update(n=(q_freq[1][1] + q_freq[2][1] + epsilon), C=(q_freq[1][0] + q_freq[2][0]) / (q_freq[1][1] + q_freq[2][1] + epsilon))
+    metric_logger.update(n=(q_freq[3][1] + q_freq[4][1] + q_freq[5][1] + epsilon), T=(q_freq[3][0] + q_freq[4][0] + q_freq[5][0]) / (q_freq[3][1] + q_freq[4][1] + q_freq[5][1] + epsilon))
+    metric_logger.update(n=(q_freq[6][1] + q_freq[7][1] + q_freq[8][1] + epsilon), D=(q_freq[6][0] + q_freq[7][0] + q_freq[8][0]) / (q_freq[6][1] + q_freq[7][1] + q_freq[8][1] + epsilon))
+    metric_logger.update(n=q_freq[0][1] + epsilon, Total=getCount(q_freq[0]))
+
+
+def update_star_metrics(q_freq, metric_logger: MetricLogger, epsilon: float) -> None:
+    # Logic specific to the 'star' dataset
+    metric_logger.update(n=q_freq[1][1] + epsilon, In=getCount(q_freq[1]))
+    metric_logger.update(n=q_freq[2][1] + epsilon, Seq=getCount(q_freq[2]))
+    metric_logger.update(n=q_freq[3][1] + epsilon, Pre=getCount(q_freq[3]))
+    metric_logger.update(n=q_freq[4][1] + epsilon, Feas=getCount(q_freq[4]))
+    metric_logger.update(n=q_freq[0][1] + epsilon, Total=getCount(q_freq[0]))
+
+def log_qtype(data, eval, metric_logger: MetricLogger, args):
+    epsilon = 1e-10
+    qtype2id = get_qtype_mapping(args.dataset)
+    if not qtype2id:
+        return
+    question_frequency = calculate_question_frequency(data, eval, qtype2id)
+    update_metrics_based_on_dataset(question_frequency, metric_logger, args.dataset, epsilon)
