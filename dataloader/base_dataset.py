@@ -1,3 +1,4 @@
+from typing import List, Optional
 import torch
 from torch.utils.data import Dataset
 import copy
@@ -8,6 +9,7 @@ class BaseDataset(Dataset):
         self.args = args
         self.max_feats = args.max_feats
         self.features_dim = 768
+        self.audio_features_dim = 1024
         self.tokenizer = tokenizer
         self.max_seq_len = args.max_seq_len
         self.split = split
@@ -25,14 +27,13 @@ class BaseDataset(Dataset):
                 print('max sequence length overflow')
         return padding_text_id
     
-    def _get_text_token(self, text: str, answer: int):
-        verbose_shapes = False
+    def _get_text_token(self, text: str, answer: int, options: Optional[List[str]] = None):
         # vqa_id, vqa_prefix_index, vqa_video_start: These are the token IDs, the index at which the answer starts, and the position in the token sequence where the video segment begins for the VQA task.
-        vqa_id, vqa_prefix_index, vqa_video_start = self.tokenizer.encode_vqa(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer)
+        vqa_id, vqa_prefix_index, vqa_video_start = self.tokenizer.encode_vqa(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer, options=options)
         # vaq_id, vaq_prefix_index, vaq_video_start: Similar to VQA, but for the VAQ task.
-        vaq_id, vaq_prefix_index, vaq_video_start = self.tokenizer.encode_vaq(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer)
+        vaq_id, vaq_prefix_index, vaq_video_start = self.tokenizer.encode_vaq(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer, options=options)
         # qav_id, qav_prefix_index: For the QAV task, which involves ordering video frames, the qav_id are the token IDs, and qav_prefix_index is the position where the video frames are expected to start in the token sequence.
-        qav_id, qav_prefix_index = self.tokenizer.encode_qav(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer)
+        qav_id, qav_prefix_index = self.tokenizer.encode_qav(text=text, max_feats=self.max_feats, split=self.split, answer_mapping=self.answer_mapping, answer=answer, options=options)
         
         # The method then converts each list of IDs (vqa_id, vaq_id, qav_id) into PyTorch tensors. 
         vqa_id = [torch.tensor(v_id, dtype=torch.int64) for v_id in vqa_id]
@@ -40,7 +41,7 @@ class BaseDataset(Dataset):
         qav_id = [torch.tensor(v_id, dtype=torch.int64) for v_id in qav_id]
 
         # Print shapes of the converted tensors
-        if verbose_shapes:
+        if self.args.debug:
             print("Shapes of original tensors:")
             print("VQA ID shape:", [v.shape for v in vqa_id])
             print("VAQ ID shape:", [v.shape for v in vaq_id])
@@ -52,11 +53,12 @@ class BaseDataset(Dataset):
         vaq_padding_text_id = self._get_padding_id(vaq_id)
         qav_padding_text_id = self._get_padding_id(qav_id)
 
-        if verbose_shapes:
+        if self.args.debug:
             print("\nShapes after padding:")
             print("VQA Padding Text ID shape:", vqa_padding_text_id.shape)
             print("VAQ Padding Text ID shape:", vaq_padding_text_id.shape)
             print("QAV Padding Text ID shape:", qav_padding_text_id.shape)
+            print("split:", self.split)
 
         # label
         # Creating Labels and Masks: After padding, the method creates labels for each task by copying the padded text IDs. It then masks parts of the sequence that aren't relevant for training
@@ -76,7 +78,18 @@ class BaseDataset(Dataset):
         
         # For the QAV task, initialize all labels to -1 and set a range for video frame ordering.
         qav_label = torch.ones_like(qav_padding_text_id) * -1
-        qav_label[:, qav_prefix_index:qav_prefix_index+self.max_feats] = torch.arange(self.max_feats)
+        if self.args.debug:
+            print("qav_label shape:", qav_label.shape)
+            print("qav_prefix_index value:", qav_prefix_index)
+        # Calculate the available space in the tensor for the assignment
+        available_space = qav_label.shape[1] - qav_prefix_index
+        # Limit the range to the minimum of available space and self.max_feats
+        range_limit = min(available_space, self.max_feats)
+        # Create a range tensor with the limited range
+        range_tensor = torch.arange(range_limit)
+        # Assign the range tensor to the appropriate slice of qav_label
+        qav_label[:, qav_prefix_index:qav_prefix_index + range_limit] = range_tensor
+
         qav_label_mask = torch.zeros_like(qav_padding_text_id)
         qav_label_mask[:, qav_prefix_index] = 1 # Only the start index is valid for the QAV task
         qav_label_mask = qav_label_mask.float()
@@ -89,6 +102,16 @@ class BaseDataset(Dataset):
         vaq_padding_text_id[~vaq_text_mask] = 0
         qav_text_mask = qav_padding_text_id.ge(0)
         qav_padding_text_id[~qav_text_mask] = 0
+
+        if self.args.debug:
+            # Print shapes of text ids
+            print("\nShapes of text ids after padding:")
+            print("VQA Padding text id shape:", vqa_padding_text_id.shape)
+            print("VQA Padding text id Mask shape:", vqa_padding_text_id.shape)
+            print("VAQ Padding text id shape:", vaq_padding_text_id.shape)
+            print("VAQ Padding text id Mask shape:", vaq_padding_text_id.shape)
+            print("QAV Padding text id shape:", qav_padding_text_id.shape)
+            print("QAV Padding text id Mask shape:", qav_padding_text_id.shape)
         
         # video index
         # Create a range of indices for the video features in each task.
@@ -96,7 +119,7 @@ class BaseDataset(Dataset):
         vaq_video_index = torch.arange(vaq_prefix_index, vaq_prefix_index + self.max_feats) # and here as well, that vaq_prefix_index is the start index of the question
         qav_video_index = torch.arange(qav_prefix_index, qav_prefix_index + self.max_feats) # but here only this works, as qav_prefix_index holds the start index of the video
 
-        if verbose_shapes:
+        if self.args.debug:
             # Print shapes of labels and masks
             print("\nShapes of labels and masks:")
             print("VQA Label shape:", vqa_label.shape)
@@ -131,16 +154,21 @@ class BaseDataset(Dataset):
             'vaq': vaq_label_mask, 
             'qav': qav_label_mask
         }
+        prefix_index = {
+            'vqa': vqa_prefix_index, 
+            'vaq': vaq_prefix_index, 
+            'qav': qav_prefix_index
+        }
 
-        if verbose_shapes:
+        if self.args.debug:
             # Print a concise overview of the first two examples of each
-            print("\nConcise overview of the first two examples:")
+            print("\nConcise overview:")
             for key in text_id:
-                print(f"{key.upper()} - Text ID (first 3 examples):", text_id[key][:3])
-                print(f"{key.upper()} - Label (first 3 examples):", label[key][:3])
+                print(f"{key.upper()} - Text ID:", text_id[key])
+                print(f"{key.upper()} - Label:", label[key])
                 print(f"{key.upper()} - Video Start:", video_start[key])
-                print(f"{key.upper()} - Video Index (first 3 examples):", video_index[key][:3])
-                print(f"{key.upper()} - Label Mask (first 3 examples):", label_mask[key][:3])
+                print(f"{key.upper()} - Video Index:", video_index[key])
+                print(f"{key.upper()} - Label Mask:", label_mask[key])
                 print()
 
-        return text_id, label, video_start, video_index, label_mask
+        return text_id, label, video_start, video_index, label_mask, prefix_index

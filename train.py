@@ -65,6 +65,12 @@ def get_args_parser():
     parser.add_argument('--bias', type=float, default=3., help='attention bias')
     parser.add_argument('--tau', type=float, default=100., help='tau')
     parser.add_argument('--sub', action='store_true', help='subtitles for VLEP and TVQA')
+    parser.add_argument('--is_generation_task', action='store_true', help='whether the task is generation or classification')
+    parser.add_argument('--debug', action='store_true', help='set to enter debug mode to check shapes quickly')
+    parser.add_argument('--jobid', type=int, help='job id to save the model ceckpoint as')
+    parser.add_argument('--audio', action='store_true', help='whether to add audio or not')
+    parser.add_argument('--audio_only', action='store_true', help='whether to exclude visual information from input.')
+    parser.add_argument('--audio_merge', type=str, choices=['sum', 'concat', 'attention', 'none'], default='none', help='Method to merge audio features (sum, concat or attention)')
 
     return parser
 
@@ -84,7 +90,7 @@ def main(args):
 
     cudnn.benchmark = True
 
-    tokenizer = Tokenizer(model_path=f'{args.llama_model_path}./tokenizer.model')
+    tokenizer = Tokenizer(model_path=f'{args.llama_model_path}./tokenizer.model', args=args)
 
     data_loader_train = load_data(args, tokenizer, split='train')
     data_loader_val = load_data(args, tokenizer, split='val')
@@ -145,10 +151,26 @@ def main(args):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
+def validate_args(args):
+    assert isinstance(args.audio, bool), "args.audio must be a boolean value"
+    assert isinstance(args.audio_only, bool), "args.audio_only must be a boolean value"
+
+    if args.audio and args.audio_only:
+        assert args.audio_merge == "none", "If you only need audio, you should not specify merge method"
+        args.audio_merge = None
+    # Ensure that if audio is enabled and it's not audio_only, then audio_merge must be specified
+    valid_audio_merge_options = ["sum", "concat", "attention"]
+    if args.audio and not args.audio_only:
+        assert args.audio_merge in valid_audio_merge_options, "An audio_merge method must be specified if audio is True and audio_only is False"
+
+    # Ensure that if audio_only is True, then audio must also be True
+    if args.audio_only:
+        assert args.audio, "If audio_only is True, audio must also be set to True"
 
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
+    validate_args(args)
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

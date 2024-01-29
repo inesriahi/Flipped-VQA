@@ -1,7 +1,6 @@
 import torch
 import math
 import sys
-import os
 from typing import Iterable
 import util.misc as misc
 import util.lr_sched as lr_sched
@@ -72,68 +71,47 @@ def val_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: torc
 
         if args.debug:
             print(f"Answer shape: {answer.shape}")
-            print(f"Answer tensor: {answer}")
+            print(f"Answer: {answer}")
 
         with torch.no_grad():
             if args.is_generation_task:
-                most_similar_indecies, extracted_answers = model(data, inference=True) # torch.Size([8, 5, 127]) (bsz, num_options, seq_len-1), most_similar_indecies (bsz, num_options)
-                if args.debug:
-                    print("Most similar indecies:", most_similar_indecies)
-
-                if args.output_dir:
-                    os.makedirs(os.path.join(args.output_dir, "extracted_answers"), exist_ok=True)
-                    misc.save_result(extracted_answers, os.path.join(args.output_dir, "extracted_answers"), 'extracted_answers_epoch%d' % epoch)
+                individual_losses, most_similar_indecies = model(data, inference=True) # torch.Size([8, 5, 127]) (bsz, num_options, seq_len-1), most_similar_indecies (bsz, num_options)
             else:
                 individual_losses = model(data, inference=True) # torch.Size([8, 5, 127]) (bsz, num_options, seq_len-1)
-                count = (individual_losses != 0).sum(-1) # [8, 5] where each element of the 5 options shows the number of nonzero losses. Why != 0? I think this is because ignore_index=0 so this represents the 
-                if args.debug:
-                    print(f"Count shape: {count.shape}")
-                    print(f"Count: {count}")
+        
+        if args.debug:
+            print(f"individual_losses shape: {individual_losses.shape}")
+            print(f"individual_losses: {individual_losses}")
 
-                prediction = (individual_losses.sum(-1) / count).argmin(-1) # [8,] select the index of the option with the least loss
-                if args.debug:
-                    print(f"Prediction shape: {prediction.shape}")
-                    print(f"Prediction: {prediction}")
+        count = (individual_losses != 0).sum(-1) # [8, 5] where each element of the 5 options shows the number of nonzero losses. Why != 0? I think this is because ignore_index=0 so this represents the 
+        if args.debug:
+            print(f"Count shape: {count.shape}")
+            print(f"Count: {count}")
+
+        prediction = (individual_losses.sum(-1) / count).argmin(-1) # [8,] select the index of the option with the least loss
+        if args.debug:
+            print(f"Prediction shape: {prediction.shape}")
+            print(f"Prediction: {prediction}")
 
         
         if args.is_generation_task:
-            if args.dataset == 'musicavqa':
-                n_correct = 0
+            eval_nearest_sentence = (answer == most_similar_indecies)
+            acc_nearest_sentence = eval_nearest_sentence.sum().item() / bsz
+        
+        eval_exact_match = (answer == prediction)
+        acc_exact_match = eval_exact_match.sum().item() / bsz
+        if args.debug:
+            print(f"Eval_exact_match: {eval_exact_match}")
+            print(f"Accuracy: {acc_exact_match}")
 
-                # Initialize a tensor of zeros with size bsz
-                eval_tensor = torch.zeros(bsz, dtype=torch.int32)
-
-                for idx, (correct_item, generated_item) in enumerate(zip(data['text'], extracted_answers)):
-                    correct_answer_text = correct_item['options'][0]
-                    generated_answer = generated_item["generated_answer"]
-
-                    if generated_answer.startswith(correct_answer_text):
-                        eval_tensor[idx] = 1
-                        n_correct += 1
-
-                acc_musicavqa = n_correct / bsz if bsz > 0 else 0
-                acc_nearest_sentence = acc_musicavqa
-                misc.log_qtype(data, eval_tensor, metric_logger, args)  # Log the accuracy for musicavqa
-
-            else:
-                eval_nearest_sentence = (answer == most_similar_indecies)
-                acc_nearest_sentence = eval_nearest_sentence.sum().item() / bsz  
-                misc.log_qtype(data, eval_nearest_sentence, metric_logger, args)
-        else:
-            eval_exact_match = (answer == prediction)
-            acc_exact_match = eval_exact_match.sum().item() / bsz
-            if args.debug:
-                print(f"Eval_exact_match: {eval_exact_match}")
-                print(f"Accuracy: {acc_exact_match}")
-
-            misc.log_qtype(data, eval_exact_match, metric_logger, args)
+        misc.log_qtype(data, eval_exact_match, metric_logger, args)
 
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
         if args.is_generation_task:
-            metric_logger.update(n=bsz, acc=acc_nearest_sentence)
+            metric_logger.update(n=bsz, acc_exact_match=acc_exact_match, acc_nearest_sentence=acc_nearest_sentence)
         else:
-            metric_logger.update(n=bsz, acc=acc_exact_match)
+            metric_logger.update(n=bsz, acc_exact_match=acc_exact_match)
         if args.debug:
             break
 

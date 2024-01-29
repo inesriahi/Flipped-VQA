@@ -15,7 +15,8 @@ module use /appl/local/csc/modulefiles/
 module load pytorch
 export PYTHONUSERBASE=/scratch/project_462000189/ines/python_base
 # pip install fairscale fire sentencepiece transformers timm pandas pysrt
-
+jobid=$SLURM_JOB_ID
+echo $jobid
 srun torchrun --nproc_per_node 8 train.py --model 7B \
 --max_seq_len 128 --batch_size 8 --epochs 5 --warmup_epochs 2 --bias 3.5 --tau 100. --max_feats 10 --dataset nextqa \
---blr 9e-2 --weight_decay 0.14 --output_dir ./checkpoint/nextqa --accum_iter 2 --vaq --qav
+--blr 9e-2 --weight_decay 0.14 --output_dir ./checkpoint/nextqa/$jobid --accum_iter 2 --vaq --qav --is_generation_task

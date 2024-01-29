@@ -1,22 +1,64 @@
+import os
 from typing import Any, Dict, List, Tuple
 import torch
 from .base_dataset import BaseDataset
 import pandas as pd
-import os
 
-class NextQA(BaseDataset):
+class Valor32K(BaseDataset):
     def __init__(self, args: Any = None, tokenizer: Any = None, split: str = 'train') -> None:
         super().__init__(args, tokenizer, split)
-        self.data = pd.read_csv(f'./data/nextqa/{split}.csv')#[:200] # TODO: Remove later
-        self.answer_mapping = {0: '(A)', 1: '(B)', 2: '(C)', 3: '(D)', 4: '(E)'}
-        self.num_options = 5
-        self.qtype_mapping = {'CH': 1, 'CW': 2, 'TN': 3, 'TC': 4, 'TP': 5, 'DL': 6, 'DC': 7, 'DO': 8}
-        folder_path_audio = '/scratch/project_462000189/ines/Flipped-VQA/data/nextqa/audio_features_imagebind_10_frames' # loaded shape later will be (10, 1024)
+        file_path = f'./data/valor32k/data_generation/processed_{split}_data.csv'
+        data = pd.read_csv(file_path, on_bad_lines="warn")
+        data.dropna(inplace=True)
+
+        # Your specified folder path
+        folder_path_video = '/scratch/project_462000189/ines/Flipped-VQA/data/valor32k/video_features'
+
+        folder_path_audio = '/scratch/project_462000189/ines/Flipped-VQA/data/valor32k/audio_features_imagebind_10_frames' # loaded shape later will be (10, 1024)
         if args.audio_merge == "attention": # need only one dim feature for each audio
-            folder_path_audio = '/scratch/project_462000189/ines/Flipped-VQA/data/nextqa/audio_features_imagebind' # loaded shape later will be (1, 1024)
-        
-        self.video_features = torch.load(f'./data/{args.dataset}/video_features/clipvitl14.pth')
+            folder_path_audio = '/scratch/project_462000189/ines/Flipped-VQA/data/valor32k/audio_features_imagebind' # loaded shape later will be (1, 1024)
+            
+
+        # List all .npy files in the folder and extract the video IDs
+        video_ids = {file_name.split('.')[0] for file_name in os.listdir(folder_path_video) if file_name.endswith('.npy')}
+        audio_ids = {file_name.split('.')[0] for file_name in os.listdir(folder_path_audio) if file_name.endswith('.npy')}
+
+        # Filter the DataFrame to keep rows where the video ID exists in the folder
+        filtered_data = data[data['video_id'].isin(video_ids)]
+        filtered_data = filtered_data[filtered_data['video_id'].isin(audio_ids)]
+
+        # Update self.data
+        self.data = filtered_data
+        print(f"Number of rows before removing nan rows in {file_path}: {len(self.data)}")
+
+        self.video_features = torch.load(f'./data/{args.dataset}/video/clipvitl14.pth')
         self.audio_features = torch.load(os.path.join(folder_path_audio, "features", "imagebind.pth"))
+        # print("Featue keys:", self.features.keys())
+        self.answer_mapping = {0: '(A)', 1: '(B)', 2: '(C)', 3: '(D)'}
+        self.num_options = 4
+        self.qtype_mapping = {
+            'count_visual': 1,
+            'count_audio': 2,
+            'count_both': 3,
+            'temporal_visual': 4,
+            'temporal_audio': 5,
+            'temporal_both': 6,
+            'desc_visual': 7,
+            'desc_audio': 8,
+            'desc_both': 9,
+            'action_visual': 10,
+            'action_audio': 11,
+            'action_both': 12,
+            'loc_visual': 13,
+            'loc_audio': 14,
+            'loc_both': 15,
+            'rel_pos_visual': 16,
+            'rel_pos_audio': 17,
+            'rel_pos_both': 18,
+            'audio_both': 19,
+            'audio_visual': 20
+            }
+
         print(f"Num {split} data: {len(self.data)}")
         
     def _get_text(self, idx: int) -> Dict[str, str]:
@@ -24,7 +66,7 @@ class NextQA(BaseDataset):
         if question[-1] != "?":
             question = str(question) + "?"
 
-        options = [self.data[f'a{i}'].values[idx] for i in range(self.num_options)]
+        options = [self.data[f'mcq_{i}'].values[idx] for i in range(1,self.num_options+1)]
 
         q_text = f"Question: {question}\n"
         o_text = "Choices: \n"
@@ -41,14 +83,14 @@ class NextQA(BaseDataset):
 
         Input:
         - video_id (str): A string identifier for the video. The function looks up 
-        this ID in the `self.features` dictionary to retrieve the corresponding 
+        this ID in the `self.video_features` dictionary to retrieve the corresponding 
         video tensor.
 
         Output:
         - Tuple containing:
             - video (torch.Tensor): A tensor representing the video. Its shape depends 
             on the condition:
-                - If `video_id` is not in `self.features`, the shape is [1, self.features_dim].
+                - If `video_id` is not in `self.video_features`, the shape is [1, self.features_dim].
                 - If `video_id` is found, but the number of features is more than `self.max_feats`, 
                 it's downsampled to [self.max_feats, self.features_dim].
                 - If the number of features is less than `self.max_feats`, it's padded with zeros 
@@ -63,7 +105,7 @@ class NextQA(BaseDataset):
         of the class instance.
         """
         if video_id not in self.video_features:
-            print(video_id, "video not found!")
+            print(video_id, "not found!")
             video = torch.zeros(1, self.features_dim) # (1, features_dim)
         else:
             video = self.video_features[video_id].float() # (n_frames, features_dim)
@@ -109,27 +151,27 @@ class NextQA(BaseDataset):
         of the class instance.
         """
         if audio_id not in self.audio_features:
-            print(audio_id, "audio not found!")
-            audio = torch.zeros(1, self.audio_features_dim) # (1, audio_features_dim)
+            print(audio_id, "not found!")
+            audio = torch.zeros(1, self.features_dim) # (1, features_dim)
         else:
-            audio = self.audio_features[audio_id].float() # (n_frames, audio_features_dim)
+            audio = self.audio_features[audio_id].float() # (n_frames, features_dim)
         if len(audio) > self.max_feats:
             sampled = []
             for j in range(self.max_feats):
                 sampled.append(audio[(j * len(audio)) // self.max_feats])
-            audio = torch.stack(sampled) # (max_feats, audio_features_dim)
+            audio = torch.stack(sampled) # (max_feats, features_dim)
             audio_len = self.max_feats
         elif len(audio) < self.max_feats and self.args.audio_merge != "attention": # because in attention case, the shape is already (1, 1024)
             audio_len = len(audio)
-            audio = torch.cat([audio, torch.zeros(self.max_feats - audio_len, self.audio_features_dim)], dim=0)
+            audio = torch.cat([audio, torch.zeros(self.max_feats - audio_len, self.features_dim)], dim=0)
         else:
             audio_len = self.max_feats
-        return audio, audio_len # shape of audio [self.max_feats, self.audio_features_dim].
+        return audio, audio_len # shape of audio [self.max_feats, self.features_dim].
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        vid = self.data['video'].values[idx]
-        qtype = self.qtype_mapping[self.data['type'].values[idx]]
-        answer:int = self.data['answer'].values[idx]
+        vid = self.data['video_id'].values[idx]
+        qtype = self.qtype_mapping[self.data['type'].values[idx] + "_" + self.data['mode'].values[idx]]
+        answer:int = int(self.data['correct_mcq'].values[idx])
         text = self._get_text(idx) # The answer itself is not included yet
         text_id, label, video_start, video_index, label_mask, prefix_index = self._get_text_token(text, answer, options=text["options"])
         if self.args.audio_only:
@@ -140,6 +182,7 @@ class NextQA(BaseDataset):
         else:
             video, video_len = self._get_video(f'{vid}') # shape of video [self.max_feats, self.features_dim].
 
+
         # shuffle video frames order for qav task
         # shuffeld_frame_indecies = torch.randperm(self.max_feats) # permutes from 0 to self.max_feats
         # shuffled_video_frames = video.clone()
@@ -149,23 +192,17 @@ class NextQA(BaseDataset):
         # if self.args.debug:
         #     print("Label QAV after shuffling video frames:", label['qav'])
         if self.args.audio and self.args.audio_only:
-            if self.args.debug:
-                print("Shape of audio:", audio.shape)
             return {"vid": vid, "text": text, "text_id": text_id, "label": label, "video_start": video_start,
                     "video_index": video_index, "audio":audio, "audio_len": audio_len, "label_mask": label_mask, 
                     "qid": idx, "answer": answer, "qtype": qtype, "prefix_index": prefix_index}
         elif self.args.audio and not self.args.audio_only:
-            if self.args.debug:
-                print("Shape of audio:", audio.shape, "Shape of video:", video.shape)
-            return {"vid": vid, "video": video, "video_len": video_len, "text": text, "text_id": text_id, 
-                    "label": label, "video_start": video_start, "video_index": video_index, "audio":audio,
-                    "audio_len": audio_len, "label_mask": label_mask, "qid": idx, "answer": answer, "qtype": qtype, 
-                    "prefix_index": prefix_index}
+            return {"vid": vid, "video": video, "video_len": video_len, "text": text, "text_id": text_id, "label": label, 
+                    "video_start": video_start, "video_index": video_index, "audio":audio, "audio_len": audio_len,
+                    "label_mask": label_mask, "qid": idx, "answer": answer, "qtype": qtype, "prefix_index": prefix_index}
         else:
-            if self.args.debug:
-                print("Shape of video:", video.shape)
-            return {"vid": vid, "video": video, "video_len": video_len, "text": text, "text_id": text_id, "label": label, "video_start": video_start,
-                    "video_index": video_index, "label_mask": label_mask, "qid": idx, "answer": answer, "qtype": qtype, "prefix_index": prefix_index}
+            return {"vid": vid, "video": video, "video_len": video_len, "text": text, "text_id": text_id, "label": label, 
+                    "video_start": video_start, "video_index": video_index, "label_mask": label_mask, "qid": idx,
+                    "answer": answer, "qtype": qtype, "prefix_index": prefix_index}
 
     def __len__(self):
         return len(self.data)

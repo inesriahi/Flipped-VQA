@@ -3,6 +3,7 @@ errors/
 data/
 checkpoint/
 pretrained/
+logs/
 core
 # Byte-compiled / optimized / DLL files
 __pycache__/

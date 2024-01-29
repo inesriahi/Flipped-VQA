@@ -13,6 +13,7 @@ import builtins
 import datetime
 import os
 import time
+import json
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Callable
@@ -21,6 +22,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as dist
 from torch import inf
+import numpy as np
 
 @dataclass
 class SmoothedValue:
@@ -79,6 +81,14 @@ class SmoothedValue:
 
     @property
     def global_avg(self) -> float: # this average is computed using the total sum of all the values
+        if self.count == 0:
+            # Handle the case where count is 0
+            # Option 1: Return a default value, e.g., 0 or None
+            return 0  # or None, or any other appropriate value
+
+            # Option 2: Raise an error or warning
+            # raise ValueError("Division by zero encountered in global_avg calculation")
+    
         return self.total / self.count
 
     @property
@@ -132,7 +142,7 @@ class MetricLogger:
         iter_time = SmoothedValue(fmt='{avg:.4f}')
         data_time = SmoothedValue(fmt='{avg:.4f}')
         num_digits = len(str(len(iterable)))
-        space_fmt = f':{num_digits}d'
+        space_fmt = f'{num_digits}d'
         log_msg = self._construct_log_msg(space_fmt, header, len(iterable))
         MB = 1024.0 * 1024.0
         for item in iterable:
@@ -148,7 +158,7 @@ class MetricLogger:
         print(f'{header} Total time: {total_time_str} ({total_time / len(iterable):.4f} s / it)')
 
     def _construct_log_msg(self, space_fmt: str, header: str, total: int) -> str:
-        log_msg = [header, f'[{space_fmt}/{total}]', 'eta: {eta}', '{meters}', 'time: {time}', 'data: {data}']
+        log_msg = [header, f'[{{:{space_fmt}}}/{total}]', 'eta: {eta}', '{meters}', 'time: {time}', 'data: {data}']
         if torch.cuda.is_available():
             log_msg.append('max mem: {memory:.0f}')
         return self.delimiter.join(log_msg)
@@ -316,7 +326,7 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             checkpoint = torch.hub.load_state_dict_from_url(args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -357,6 +367,47 @@ def get_qtype_mapping(dataset_name: str) -> Dict[str, int]:
         return {'CH': 1, 'CW': 2, 'TN': 3, 'TC': 4, 'TP': 5, 'DL': 6, 'DC': 7, 'DO': 8}
     elif dataset_name == "star":
         return {'In': 1, 'Seq': 2, 'Pre': 3, 'Feas': 4}
+    elif dataset_name == "valor32k":
+        return {
+            'count_visual': 1,
+            'count_audio': 2,
+            'count_both': 3,
+            'temporal_visual': 4,
+            'temporal_audio': 5,
+            'temporal_both': 6,
+            'desc_visual': 7,
+            'desc_audio': 8,
+            'desc_both': 9,
+            'action_visual': 10,
+            'action_audio': 11,
+            'action_both': 12,
+            'loc_visual': 13,
+            'loc_audio': 14,
+            'loc_both': 15,
+            'rel_pos_visual': 16,
+            'rel_pos_audio': 17,
+            'rel_pos_both': 18,
+            'audio_both': 19,
+            'audio_visual': 20
+            }
+    elif dataset_name == "musicavqa":
+        return {
+            'Audio_Temporal': 1,
+            'Audio_Existential': 2,
+            'Audio_Comparative': 3,
+            'Audio_Location': 4,
+            'Audio_Counting': 5,
+            'Visual_Temporal': 6,
+            'Visual_Existential': 7,
+            'Visual_Comparative': 8,
+            'Visual_Location': 9,
+            'Visual_Counting': 10,
+            'Audio-Visual_Temporal': 11,
+            'Audio-Visual_Existential': 12,
+            'Audio-Visual_Comparative': 13,
+            'Audio-Visual_Location': 14,
+            'Audio-Visual_Counting': 15
+        }
     else:
         return {}
 
@@ -385,6 +436,10 @@ def update_metrics_based_on_dataset(q_freq, metric_logger: MetricLogger, dataset
         update_nextqa_metrics(q_freq, metric_logger, epsilon)
     elif dataset_name == "star":
         update_star_metrics(q_freq, metric_logger, epsilon)
+    elif dataset_name == "valor32k":
+        update_valor32k_metrics(q_freq, metric_logger, epsilon)
+    elif dataset_name == "musicavqa":
+        update_musicavqa_metrics(q_freq, metric_logger, epsilon)
 
 def update_nextqa_metrics(q_freq, metric_logger, epsilon: float) -> None:
     # Logic specific to the 'nextqa' dataset
@@ -402,6 +457,72 @@ def update_star_metrics(q_freq, metric_logger: MetricLogger, epsilon: float) -> 
     metric_logger.update(n=q_freq[4][1] + epsilon, Feas=getCount(q_freq[4]))
     metric_logger.update(n=q_freq[0][1] + epsilon, Total=getCount(q_freq[0]))
 
+def update_valor32k_metrics(q_freq, metric_logger: MetricLogger, epsilon: float) -> None:
+    def calculate_score_and_count(ids):
+        total_score = sum([q_freq[id][0] for id in ids])
+        total_count = sum([q_freq[id][1] for id in ids])
+        avg_score = total_score / (total_count + epsilon) #if total_count > 0 else None
+        return avg_score, total_count
+
+    # Categories
+    audio_score, audio_count = calculate_score_and_count([2, 5, 8, 11, 14, 17])
+    visual_score, visual_count = calculate_score_and_count([1, 4, 7, 10, 13, 16, 20])
+    both_score, both_count = calculate_score_and_count([3, 6, 9, 12, 15, 18, 19])
+
+    # Question Types
+    count_score, count_count = calculate_score_and_count([1, 2, 3])
+    temporal_score, temporal_count = calculate_score_and_count([4, 5, 6])
+    desc_score, desc_count = calculate_score_and_count([7, 8, 9])
+    action_score, action_count = calculate_score_and_count([10, 11, 12])
+    loc_score, loc_count = calculate_score_and_count([13, 14, 15])
+    rel_pos_score, rel_pos_count = calculate_score_and_count([16, 17, 18])
+    audio_second_score, audio_second_count = calculate_score_and_count([19, 20])
+
+    # Update metrics
+    metric_logger.update(
+        n_audio=audio_count + epsilon, audio=audio_score, 
+        n_visual=visual_count + epsilon, visual=visual_score, 
+        n_both=both_count + epsilon, both=both_score,
+        n_count=count_count + epsilon, count=count_score, 
+        n_temporal=temporal_count + epsilon, temporal=temporal_score, 
+        n_desc=desc_count + epsilon, desc=desc_score, 
+        n_action=action_count + epsilon, action=action_score, 
+        n_loc=loc_count + epsilon, loc=loc_score, 
+        n_rel_pos=rel_pos_count + epsilon, rel_pos=rel_pos_score,
+        n_audio_second=audio_second_count + epsilon, audio_second=audio_second_score
+    )
+
+def update_musicavqa_metrics(q_freq, metric_logger: MetricLogger, epsilon: float) -> None:
+    def calculate_score_and_count(ids):
+        total_score = sum([q_freq[id][0] for id in ids])
+        total_count = sum([q_freq[id][1] for id in ids])
+        avg_score = total_score / (total_count + epsilon)
+        return avg_score, total_count
+
+    # Categories based on sensory modality
+    audio_score, audio_count = calculate_score_and_count([1, 2, 3, 4, 5])
+    visual_score, visual_count = calculate_score_and_count([6, 7, 8, 9, 10])
+    audio_visual_score, audio_visual_count = calculate_score_and_count([11, 12, 13, 14, 15])
+
+    # Categories based on question type
+    temporal_score, temporal_count = calculate_score_and_count([1, 6, 11])
+    existential_score, existential_count = calculate_score_and_count([2, 7, 12])
+    comparative_score, comparative_count = calculate_score_and_count([3, 8, 13])
+    location_score, location_count = calculate_score_and_count([4, 9, 14])
+    counting_score, counting_count = calculate_score_and_count([5, 10, 15])
+
+    # Update metrics
+    metric_logger.update(
+        n_audio=audio_count + epsilon, audio=audio_score,
+        n_visual=visual_count + epsilon, visual=visual_score,
+        n_audio_visual=audio_visual_count + epsilon, audio_visual=audio_visual_score,
+        n_temporal=temporal_count + epsilon, temporal=temporal_score,
+        n_existential=existential_count + epsilon, existential=existential_score,
+        n_comparative=comparative_count + epsilon, comparative=comparative_score,
+        n_location=location_count + epsilon, location=location_score,
+        n_counting=counting_count + epsilon, counting=counting_score
+    )
+
 def log_qtype(data, eval, metric_logger: MetricLogger, args):
     epsilon = 1e-10
     qtype2id = get_qtype_mapping(args.dataset)
@@ -409,3 +530,81 @@ def log_qtype(data, eval, metric_logger: MetricLogger, args):
         return
     question_frequency = calculate_question_frequency(data, eval, qtype2id)
     update_metrics_based_on_dataset(question_frequency, metric_logger, args.dataset, epsilon)
+
+# def filter_result(result):
+#     new_result = []
+#     all_images = []
+#     for d in result:
+#         if d["image_id"] not in all_images:
+#             all_images.append(d["image_id"])
+#             new_result.append(d)
+#         else:
+#             continue
+#     return new_result
+
+def convert_numpy(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_numpy(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy(v) for v in obj]
+    else:
+        return obj
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return super(NumpyEncoder, self).default(obj)
+        
+def save_result(result, result_dir, filename, is_json=True, is_list=True):
+    if is_json:
+        result_file = os.path.join(result_dir, '%s_rank%d.json' % (filename, get_rank()))
+        final_result_file = os.path.join(result_dir, '%s.json' % filename)
+        with open(result_file, 'w') as f:
+            json.dump(result, f, cls=NumpyEncoder)
+    else:
+        result_file = os.path.join(result_dir, '%s_rank%d.pth' % (filename, get_rank()))
+        final_result_file = os.path.join(result_dir, '%s.pth' % filename)
+        torch.save(result, result_file)
+
+    dist.barrier()
+
+    if is_main_process():
+        # combine results from all processes
+        if is_list:
+            result = []
+        else:
+            result = {}
+        for rank in range(get_world_size()):
+            if is_json:
+                result_file = os.path.join(result_dir, '%s_rank%d.json' % (filename, rank))
+                res = json.load(open(result_file, 'r'))
+            else:
+                result_file = os.path.join(result_dir, '%s_rank%d.pth' % (filename, rank))
+                res = torch.load(result_file)
+            if is_list:
+                result += res
+            else:
+                result.update(res)
+        if is_json:
+            # new_result = filter_result(result)
+            # Use the custom encoder when serializing
+            with open(result_file, 'w') as f:
+                json.dump(result, f, cls=NumpyEncoder)
+        else:
+            torch.save(result, final_result_file)
+
+        print('result file saved to %s' % final_result_file)
+    dist.barrier()
+    return final_result_file

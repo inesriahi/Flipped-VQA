@@ -91,7 +91,7 @@ class Attention(nn.Module):
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-
+        
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
         if adapter is not None:
@@ -111,7 +111,7 @@ class Attention(nn.Module):
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
-        if adapter is not None:
+        if adapter is not None:            
             adapter_scores = F.softmax(scores[..., :adapter_len].float(), dim=-1).type_as(xq) * self.gate1.tanh().half()
             if video_start is not None:
                 vt_scores = scores[..., adapter_len:].clone()
@@ -164,7 +164,7 @@ class CrossAttentionModule(nn.Module):
     QK_T = QK_T / scale
 
     attention_scores = F.softmax(QK_T, -1)
-
+    
     res = torch.matmul(attention_scores, V)  # (bs, seq_len = 10, feature_dim = 768)
     return res
 
@@ -201,28 +201,27 @@ class Transformer(nn.Module):
         self.tokenizer = Tokenizer(model_path=f'{args.llama_model_path}./tokenizer.model', args=args)
         self.eos_id = self.tokenizer.eos_id
         self.answer_token_id = self.tokenizer.a_token_id
-        self.q_token_id = self.tokenizer.q_token_id
 
         self.tok_embeddings = Embedding(params.vocab_size, params.dim)
 
         self.adapter_query = Embedding(params.adapter_len * params.adapter_layer, params.dim)
         if args.audio and args.audio_only:
             self.audio_proj = Linear(1024, params.dim, bias=False).half()
-
+        
         elif args.audio and args.audio_merge == 'concat': # audio and video and the method is to concat
             self.visual_proj = Linear(768 + 1024, params.dim, bias=False).half() # since audio features are concatenated with video features
-
+        
         elif args.audio and args.audio_merge in 'sum':
             self.audio_proj = Linear(1024, params.dim, bias=False).half()
             self.visual_proj = Linear(768, params.dim, bias=False).half()
-
+        
         elif args.audio and args.audio_merge == 'attention': # from dataloader, the shape of audio here is (1, 1024) assuming that the audio feature model is imagebind
             self.audio_proj = Linear(1024, 768, bias=False).half()
             self.visual_proj = Linear(768, params.dim, bias=False).half()
         else: # video only
             self.visual_proj = Linear(768, params.dim, bias=False).half()
             self.visual_proj = self.visual_proj.half()
-
+        
         if args.audio and args.audio_merge == 'attention':
             self.video_audio_cross_attn = CrossAttentionModule(768).float()
 
@@ -248,9 +247,6 @@ class Transformer(nn.Module):
         self.tau = args.tau
 
     def forward(self, data, inference=False):
-        if inference:
-            return self.inference(data)
-
         if not self.args.audio: # video only
             video = data['video'].cuda()
         elif not self.args.audio_only: # video and audio
@@ -258,11 +254,20 @@ class Transformer(nn.Module):
             audio = data['audio'].cuda().half()
         else: # audio only
             audio = data['audio'].cuda().half()
+        # shuffled_video = data['shuffled_video_frames'].cuda()
+        # shuffeld_frame_indecies = data['shuffeld_frame_indecies'].cuda()
         vqa_id, vaq_id, qav_id = data['text_id']['vqa'].cuda(), data['text_id']['vaq'].cuda(), data['text_id']['qav'].cuda()
         vqa_label, vaq_label, qav_label = data['label']['vqa'].cuda(), data['label']['vaq'].cuda(), data['label']['qav'].cuda()
         #vqa_label_mask, vaq_label_mask, qav_label_mask = data['label_mask']['vqa'].cuda(), data['label_mask']['vaq'].cuda(), data['label_mask']['qav'].cuda()
         vqa_video_start, vaq_video_start, qav_video_index = data['video_start']['vqa'][0], data['video_start']['vaq'][0], data['video_index']['qav'].cuda()
-
+        
+        # if self.args.is_generation_task and inference:
+        #     original_vqa_id = vqa_id.clone()
+        #     original_vqa_id = vqa_id.clone()
+        #     original_qav_id = qav_id.clone()
+        #     vqa_id = vqa_id[:,0:1,:]
+        #     vaq_id = vaq_id[:,0:1,:]
+        #     qav_id = qav_id[:,0:1,:]
 
         bsz, n_options, seqlen = vqa_id.shape # in case of training, n_options is 1, in case of val or test, n_options is len(answer_mapping) with same text repeated except for the encoded answer
         if self.args.debug and not inference:
@@ -276,23 +281,26 @@ class Transformer(nn.Module):
         vqa_id, vaq_id = vqa_id.reshape(-1, seqlen), vaq_id.reshape(-1, seqlen) #(bsz * n_options, seqlen)
         vqa_label, vaq_label = vqa_label.reshape(-1, seqlen), vaq_label.reshape(-1, seqlen)
         vqa_label, vaq_label = vqa_label[:, 1:].flatten(), vaq_label[:, 1:].flatten()
-
+        
         qav_id = qav_id.reshape(-1, seqlen)
         qav_label = qav_label.reshape(-1, seqlen)
         qav_video_mask = qav_label.ge(0)
         qav_label = qav_label[:, 1:].flatten()
-
-
+        
+        
         with torch.no_grad():
             vqa_h = self.tok_embeddings(vqa_id) #(bsz * n_options, seqlen, dim)
-
-            if self.args.vaq:
+            # print("Before fill vqa_h.shape:", vqa_h.shape)
+            # vqa_h = vqa_h.masked_fill(vqa_label_mask.unsqueeze(-1).bool(), -1)
+            # print("After fill vqa_h.shape:", vqa_h.shape)
+            
+            if self.args.vaq and not inference:
                 vaq_h = self.tok_embeddings(vaq_id)
                 # vaq_h = vaq_h.masked_fill(vaq_label_mask.unsqueeze(-1).bool(), -1)
-
-            if self.args.qav:
+            
+            if self.args.qav and not inference:
                 qav_h = self.tok_embeddings(qav_id)
-
+            
         freqs_cis = self.freqs_cis.to(vqa_h.device)
         freqs_cis = freqs_cis[:seqlen]
         mask = None
@@ -300,309 +308,216 @@ class Transformer(nn.Module):
         mask = torch.triu(mask, diagonal=0 + 1).type_as(vqa_h)
         start_pos = 0
         vaq_loss, qav_loss = torch.tensor([0]).cuda(), torch.tensor([0]).cuda()
-
+        
         adapter = self.adapter_query.weight.reshape(-1, self.adapter_len, self.params.dim).unsqueeze(1)
 
         if self.args.audio and self.args.audio_only:
             _video_feature = self.audio_proj(audio) # (10, params.dim)
-
+        
         elif self.args.audio and self.args.audio_merge == 'concat': # audio and video and the method is to concat
             concatted = torch.cat([video, audio], dim = -1)  # (10, 768 + 1024) # since audio features are concatenated with video features
             _video_feature = self.visual_proj(concatted)
-
+        
         elif self.args.audio and self.args.audio_merge in 'sum':
             _video_feature = self.audio_proj(audio).half() + self.visual_proj(video).half() # (10, params.dim)
-
+        
         elif self.args.audio and self.args.audio_merge == 'attention': # from dataloader, the shape of audio here is (1, 1024) assuming that the audio feature model is imagebind
             audio_features = self.audio_proj(audio) # (1,768)
             _video_feature = self.video_audio_cross_attn(video, audio_features) # (10, 768)
 
             _video_feature = self.visual_proj(_video_feature).half() # (10, params.dim)
         else: # video only
-            _video_feature = self.visual_proj(video)
-
+            _video_feature = self.visual_proj(video)       
+            
+        if inference:
+            _video_feature = _video_feature.unsqueeze(1).repeat(1, n_options, 1, 1).view(-1, _video_feature.shape[-2], _video_feature.shape[-1])
         video_feature = (_video_feature + self.temporal_emb.weight[None, :, :]).half()
-
+        
         vqa_h = vqa_h.clone()
         vqa_h[:, vqa_video_start:vqa_video_start+self.max_feats] = video_feature
 
-
-        if self.args.vaq:
+        
+        if self.args.vaq and not inference:
             vaq_h = vaq_h.clone()
             vaq_h[:, vaq_video_start:vaq_video_start+self.max_feats] = video_feature
-
-        if self.args.qav:
+            
+        if self.args.qav and not inference:
             qav_h = qav_h * ~qav_video_mask[..., None]
             qav_h.scatter_add_(1, qav_video_index[..., None].repeat(1, 1, self.params.dim), video_feature)
-
+        
         for i, layer in enumerate(self.layers[-1 * self.adapter_layer:]):
             vqa_h = layer(vqa_h, start_pos, freqs_cis, mask, adapter[i].half(), vqa_video_start)
-
-            if self.args.vaq:
+            
+            if self.args.vaq and not inference:
                 vaq_h = layer(vaq_h, start_pos, freqs_cis, mask, adapter[i].half(), vaq_video_start)
-
-            if self.args.qav:
+            
+            if self.args.qav and not inference:
                 qav_h = layer(qav_h, start_pos, freqs_cis, mask, adapter[i].half(), None)
-
+    
         vqa_h = self.norm(vqa_h)
         vqa_output = self.output(vqa_h)
         vqa_output = vqa_output[:, :-1, :].reshape(-1, self.vocab_size) # (bsz x num_options x (seqlen - 1), vocab_size)
         vqa_loss = self.vqa_criterion(vqa_output, vqa_label)
-
-        if self.args.vaq:
+        
+        if self.args.vaq and not inference:
             vaq_h = self.norm(vaq_h)
             vaq_output = self.output(vaq_h)
             vaq_output = vaq_output[:, :-1, :].reshape(-1, self.vocab_size)
             vaq_loss = self.vaq_criterion(vaq_output, vaq_label)
-
-        if self.args.qav:
+            
+        if self.args.qav and not inference:
             qav_h = self.norm(qav_h)
             qav_output = torch.bmm(qav_h[:, :-1].float(), _video_feature.transpose(1, 2).float()).reshape(-1, self.max_feats)
             qav_loss = self.qav_criterion(qav_output / self.tau, qav_label)
             if self.args.debug:
                 print(f"QAV Label inside model, first sequence: {qav_label[:128]}")
-
-        return vqa_loss, vaq_loss, qav_loss
-
-    def inference(self, data):
-        if not self.args.audio: # video only
-            video = data['video'].cuda()
-        elif not self.args.audio_only: # video and audio
-            video = data['video'].cuda()
-            audio = data['audio'].cuda().half()
-        else: # audio only
-            audio = data['audio'].cuda().half()
-
-        vqa_id = data['text_id']['vqa'].cuda()
-        vqa_label = data['label']['vqa'].cuda()
-        vqa_video_start = data['video_start']['vqa'][0]
-        vqa_prefix_index = data['prefix_index']['vqa']
-        vid = data['vid']
-
-        bsz, n_options, seqlen = vqa_id.shape # in case of training, n_options is 1, in case of val or test, n_options is len(answer_mapping) with same text repeated except for the encoded answer
-        vqa_id_all_options = vqa_id.clone()
-        n_options_all = n_options
-        vqa_id = vqa_id[:, 0:1, :]
-        vqa_label = vqa_label[:, 0:1, :]
-        n_options = 1
-        vqa_id = vqa_id.reshape(-1, seqlen) #(bsz * n_options, seqlen)
-        vqa_label = vqa_label.reshape(-1, seqlen)
-        vqa_label = vqa_label[:, 1:].flatten()
-
-        vqa_h = self.tok_embeddings(vqa_id) #(bsz * n_options, seqlen, dim)
-
-        freqs_cis = self.freqs_cis.to(vqa_h.device)
-        freqs_cis = freqs_cis[:seqlen]
-        mask = None
-        mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=vqa_h.device)
-        mask = torch.triu(mask, diagonal=0 + 1).type_as(vqa_h)
-        start_pos = 0
-
-        adapter = self.adapter_query.weight.reshape(-1, self.adapter_len, self.params.dim).unsqueeze(1)
-
-        if self.args.audio and self.args.audio_only:
-            _video_feature = self.audio_proj(audio) # (10, params.dim)
-
-        elif self.args.audio and self.args.audio_merge == 'concat': # audio and video and the method is to concat
-            concatted = torch.cat([video, audio], dim = -1)  # (10, 768 + 1024) # since audio features are concatenated with video features
-            _video_feature = self.visual_proj(concatted)
-
-        elif self.args.audio and self.args.audio_merge in 'sum':
-            _video_feature = self.audio_proj(audio).half() + self.visual_proj(video).half() # (10, params.dim)
-
-        elif self.args.audio and self.args.audio_merge == 'attention': # from dataloader, the shape of audio here is (1, 1024) assuming that the audio feature model is imagebind
-            audio_features = self.audio_proj(audio) # (1,768)
-            _video_feature = self.video_audio_cross_attn(video, audio_features) # (10, 768)
-
-            _video_feature = self.visual_proj(_video_feature).half() # (10, params.dim)
-        else: # video only
-            _video_feature = self.visual_proj(video)
-
-        _video_feature = _video_feature.unsqueeze(1).repeat(1, n_options, 1, 1).view(-1, _video_feature.shape[-2], _video_feature.shape[-1])
-        video_feature = (_video_feature + self.temporal_emb.weight[None, :, :]).half()
-
-        vqa_h = vqa_h.clone()
-        vqa_h[:, vqa_video_start:vqa_video_start+self.max_feats] = video_feature
-
         
+        if inference:
+            individual_losses = self.inference_criterion(vqa_output, vqa_label)
+            individual_losses = individual_losses.reshape(bsz, n_options, -1)
 
-        for batch_idx in range(bsz):
-            # Reset current_vqa_h for each batch item
-            # current_vqa_h = vqa_h[batch_idx * n_options: (batch_idx + 1) * n_options, :, :].clone()
-
-            # Get the starting index for the current batch item
-            current_start_idx = vqa_prefix_index[batch_idx]
-            orig_vqa_h = vqa_h[batch_idx:batch_idx+1].clone()
-            current_vqa_h = vqa_h[batch_idx:batch_idx+1].clone()
-
-            # Process each sequence based on its starting index
-            for start_idx in range(current_start_idx-1, current_start_idx + 30):
-                for i, layer in enumerate(self.layers[-1 * self.adapter_layer:]):
-                    # Apply the layer
-                    current_vqa_h = layer(current_vqa_h, start_pos, freqs_cis, mask, adapter[i].half(), vqa_video_start)
-
-
-                # Normalize and get output for the current position
-                current_vqa_h = self.norm(current_vqa_h)
-                current_vqa_output = self.output(current_vqa_h)
-                # Generate prediction for the current position
-                pred = current_vqa_output[:, start_idx, :].max(1)[1].unsqueeze(1)
+            if self.args.debug and not self.args.is_generation_task:
+                                # Extracting the most likely token sequence from the output
+                vqa_output_reshaped_argmax = torch.argmax(vqa_output, dim=-1).reshape(bsz, -1, (seqlen - 1))
+                vqa_output_tokens = vqa_output_reshaped_argmax[:, 0, :]  # Shape: (batch_size, (seqlen - 1))
                 
-                # Debugging: Print layer output
+                # More debugging output
                 if self.args.debug:
-                    decoded_output = self.tokenizer.decode(pred.tolist())
-                    print(f"output at start_idx {start_idx}: {decoded_output}: {pred.tolist()}")
-                    print("current_vqa_output.shape:", current_vqa_output.shape)
-                    print("vqa_h.shape:", vqa_h.shape)
-                    print("vqa_id.shape:", vqa_id.shape)
-                    print("pred.shape:", pred.shape)
+                    print("vqa_output_tokens.shape in val classification", vqa_output_tokens.shape)
+                    # Printing the first few contents of the output tokens for inspection
+                    for i in range(3):
+                        print(f"vqa_output_tokens content {i+1}:", vqa_output_reshaped_argmax[:, i, :])
+                    for batch_item in vqa_output_reshaped_argmax:
+                        for i in range(n_options):
+                            print("decoded output in classification:", self.tokenizer.decode(batch_item[i].tolist()))
 
-                # Update the vqa_id tensor with the new prediction
-                vqa_id[batch_idx * n_options : (batch_idx + 1) * n_options, start_idx + 1] = pred.squeeze(1)
+            if self.args.is_generation_task:
+                if self.args.debug:
+                    print("vqa_output.shape", vqa_output.shape)  # (bsz x num_options x (seqlen - 1), vocab_size)
+                
+                # Extracting the most likely token sequence from the output
+                vqa_output_reshaped_argmax = torch.argmax(vqa_output, dim=-1).reshape(bsz, -1, (seqlen - 1))
+                vqa_output_tokens = vqa_output_reshaped_argmax[:, 0, :]  # Shape: (batch_size, (seqlen - 1))
+                
+                # More debugging output
+                if self.args.debug:
+                    print("vqa_output_tokens.shape", vqa_output_tokens.shape)
+                    # Printing the first few contents of the output tokens for inspection
+                    for i in range(3):
+                        print(f"vqa_output_reshaped_argmax content {i+1}:", vqa_output_reshaped_argmax[:, i, :])
+                    for batch_item in vqa_output_reshaped_argmax:
+                        for i in range(n_options):
+                            print("decoded output:", self.tokenizer.decode(batch_item[i].tolist()))
 
-                # Embed the predicted token for the next iteration
-                pred_h = self.tok_embeddings(pred)
-                # current_vqa_h[:, start_idx + 1] = pred_h.squeeze(1)
-                orig_vqa_h[:, start_idx+1] = pred_h.squeeze(1)
-                current_vqa_h = orig_vqa_h.clone()
+                # Creating a mask to identify the answer part in the sequence
+                vqa_placeholder_mask = vqa_label.reshape(bsz, -1, seqlen-1)[:, 0, :] != 0  # Non-zero values represent the answer part ([bsz, seqlen-1])
+                vqa_id_reshaped = vqa_id.reshape(bsz, n_options, seqlen)
+                
+                extracted_answers_per_batch = []
+                for batch_item in vqa_id_reshaped:
+                    start_index = batch_item[0].tolist().index(self.answer_token_id) + 5 # "Answer" token id and skip 5 tokens for the ": The answer is "
+                    extracted_answers = []
+                    if start_index is not None:
+                        for choice in batch_item:
+                            eos_index = choice[start_index:].tolist().index(self.eos_id) + start_index if self.eos_id in choice[start_index:].tolist() else len(choice)
+                            answer = self.tokenizer.decode(choice[start_index:eos_index].tolist())
+                            extracted_answers.append(answer)
+                            if self.args.debug:
+                                print("Extracted answer:", answer)
+                    else:
+                        extracted_answers = [''] * n_options # Default to empty string if no answer part is found
+                    extracted_answers_per_batch.append(extracted_answers)
+                choice_embeddings_agg = []
+                for extracted_answers in extracted_answers_per_batch:
+                    # Encode each answer and convert to tensor
+                    encoded_answers = [torch.tensor(self.tokenizer.encode(answer, bos=False, eos=False), dtype=torch.long) for answer in extracted_answers]
+                    # Pad the sequences so they all have the same length
+                    padded_encoded_answers = torch.nn.utils.rnn.pad_sequence(encoded_answers, batch_first=True, padding_value=0)
+                    # Move to the appropriate device
+                    padded_encoded_answers = padded_encoded_answers.to(self.tok_embeddings.weight.device)
+                    # Get the embeddings
+                    answer_embeddings = self.tok_embeddings(padded_encoded_answers)
+                    # Aggregate along sequence length
+                    answer_embeddings_agg = torch.mean(answer_embeddings, dim=1)
+                    choice_embeddings_agg.append(answer_embeddings_agg)
+                
+                choice_embeddings_agg = torch.stack(choice_embeddings_agg)  # Shape: (bsz, n_options, embed_size)
+                        
+                if self.args.debug:
+                    print("vqa_placeholder_mask.shape", vqa_placeholder_mask.shape)
+                    vqa_id_reshaped = vqa_id.reshape(bsz, n_options, seqlen)
+                    decoded_choices_output = [self.tokenizer.decode(choice.tolist()) for choice in vqa_id_reshaped.view(-1, seqlen)]
+                    print("Decoded choices:", decoded_choices_output)
 
-        # Print the final VQA ID after predictions
-        if self.args.debug:
-            print("VQA ID after pred:", vqa_id)
-            for batch_item in vqa_id:
-                print("decoded output in generation:", self.tokenizer.decode(batch_item[1:].tolist()))
+                    # New debug prints for the extracted answers
+                    for batch_index, extracted_answers in enumerate(extracted_answers_per_batch):
+                        print(f"Batch {batch_index + 1} extracted answers:", extracted_answers)
 
-        # Creating a mask to identify the answer part in the sequence
-        vqa_placeholder_mask = vqa_label.reshape(bsz, -1, seqlen-1)[:, 0, :] != 0  # Non-zero values represent the answer part ([bsz, seqlen-1])
+                    # Debug prints for the embeddings of the extracted answers
+                    for batch_index, embeddings in enumerate(choice_embeddings_agg):
+                        print(f"Batch {batch_index + 1} choice embeddings shape:", embeddings.shape)
 
-        extracted_answers_per_batch = self.extract_answers(vqa_id_all_options, bsz, n_options_all, seqlen)
+                    # Additional debug prints for reshaped labels and IDs
+                    for i in range(n_options):
+                        vqa_label_reshaped = vqa_label.reshape(bsz, -1, seqlen-1)[:, i, :]
+                        vqa_id_reshaped_option = vqa_id_reshaped[:, i, :]
+                        print(f"vqa_id_reshaped_option {i+1}.shape", vqa_id_reshaped_option.shape)
 
-        choice_embeddings_agg = self.embed_and_aggregate_answers(extracted_answers_per_batch)
+                # Filtering the output tokens based on the placeholder mask
+                filtered_vqa_output_tokens = [tokens[mask] for tokens, mask in zip(vqa_output_tokens, vqa_placeholder_mask)]
+                
+                # Initializing a list to store output embeddings
+                vqa_output_embed = []
+                if self.args.debug:
+                    decoded_sequences_output = []
 
-        if self.args.debug:
-            print("vqa_placeholder_mask.shape", vqa_placeholder_mask.shape)
-            vqa_id_reshaped = vqa_id.reshape(bsz, n_options, seqlen)
-            decoded_choices_output = [self.tokenizer.decode(choice.tolist()) for choice in vqa_id_reshaped.view(-1, seqlen)]
-            print("Decoded choices:", decoded_choices_output)
-
-            # New debug prints for the extracted answers
-            for batch_index, extracted_answers in enumerate(extracted_answers_per_batch):
-                print(f"Batch {batch_index + 1} extracted answers:", extracted_answers)
-
-            # Debug prints for the embeddings of the extracted answers
-            for batch_index, embeddings in enumerate(choice_embeddings_agg):
-                print(f"Batch {batch_index + 1} choice embeddings shape:", embeddings.shape)
-
-            # Additional debug prints for reshaped labels and IDs
-            for i in range(n_options):
-                vqa_id_reshaped_option = vqa_id_reshaped[:, i, :]
-                print(f"vqa_id_reshaped_option {i+1}.shape", vqa_id_reshaped_option.shape)
-
-        # Filtering the output tokens based on the placeholder mask
-        vqa_output_embed = self.filter_and_process_output_tokens(vqa_id, vqa_placeholder_mask)
-
-        # Aggregating the embeddings along the sequence length
-        vqa_output_embed_agg = self.aggregate_output_embeddings(vqa_output_embed)
-
-        if self.args.debug:
-            print("vqa_output_embed_agg.shape", vqa_output_embed_agg.shape)
-            print("choice_embeddings_agg.shape", choice_embeddings_agg.shape)
-
-        # Calculate similarity for each instance in the batch considering options
-        most_similar_indices, similarities = self.find_most_similar(vqa_output_embed_agg, choice_embeddings_agg)
-        if self.args.debug:
-            print("Most similar indices:", most_similar_indices)
-            print("Similarities:", similarities)
-
-        extracted_answers = []
-        for idx in range(vqa_id.size(0)):
-            # Extract video ID
-            video_id = vid[idx]
-
-            # Decode question
-            question_start = vqa_id[idx].tolist().index(894) + 2 # Assuming 894 is another q_token_id
-            question_end = vqa_id[idx].tolist().index(self.answer_token_id)
-            question_decoded = self.tokenizer.decode(vqa_id[idx, question_start:question_end].tolist())
-
-            # Decode answer
-            answer_start = question_end + 5
-            answer_tokens = vqa_id[idx, answer_start:].tolist()
-
-            # Find the end of the answer
-            try:
-                answer_end = answer_tokens.index(self.eos_id)
-            except ValueError:
-                # If EOS is not found, use the length of the list or find the first padding token
-                answer_end = next((i for i, token in enumerate(answer_tokens) if token == 0), len(answer_tokens))
-
-            answer_decoded = self.tokenizer.decode(answer_tokens[:answer_end])
-
-            extracted_answers.append({
-                'video_id': video_id,
-                'question': question_decoded,
-                'generated_answer': answer_decoded,
-            })
-
-        return most_similar_indices, extracted_answers
-
-    def debug_print(self, *debug_info) -> None:
-        if self.args.debug:
-            print(*debug_info)
-
-    def extract_answers(self, vqa_id_with_options: torch.Tensor, bsz: int, n_options: int, seqlen: int) -> list:
-        extracted_answers_per_batch = []
-        vqa_id_reshaped = vqa_id_with_options.reshape(bsz, n_options, seqlen)
-        for batch_item in vqa_id_reshaped:
-            start_index = batch_item[0].tolist().index(self.answer_token_id) + 5
-            extracted_answers = []
-            for choice in batch_item:
-                eos_index = choice[start_index:].tolist().index(self.eos_id) + start_index if self.eos_id in choice[start_index:].tolist() else len(choice)
-                answer_tokens = choice[start_index:eos_index]
-                extracted_answers.append(answer_tokens)
-            extracted_answers_per_batch.append(extracted_answers)
-        return extracted_answers_per_batch
+                # Process each set of output tokens
+                for output_tokens in filtered_vqa_output_tokens:
+                    if self.args.debug:
+                        # Decoding the output tokens for debugging
+                        decoded_sequences_output.append(self.tokenizer.decode(output_tokens.tolist()))
+                    
+                    # Identifying the end of the answer using 'eos_id' and extracting relevant part
+                    eos_index = (output_tokens == self.eos_id).nonzero(as_tuple=True)[0]
+                    if eos_index.numel() > 0:
+                        output_tokens = output_tokens[:eos_index[0]]
+                    
+                    # Embedding the tokens and adding to the list
+                    vqa_output_embed.append(self.tok_embeddings(output_tokens))
+                
+                
+                if self.args.debug:
+                    print("decoded sequences output:", decoded_sequences_output)
 
 
-    def embed_and_aggregate_answers(self, extracted_answers_per_batch: list) -> torch.Tensor:
-        choice_embeddings_agg = []
-        for extracted_answers in extracted_answers_per_batch:
-            padded_encoded_answers = torch.nn.utils.rnn.pad_sequence(extracted_answers, batch_first=True, padding_value=0)
-            padded_encoded_answers = padded_encoded_answers.to(self.tok_embeddings.weight.device)
-            answer_embeddings = self.tok_embeddings(padded_encoded_answers)
-            answer_embeddings_agg = torch.mean(answer_embeddings, dim=1)
-            choice_embeddings_agg.append(answer_embeddings_agg)
+                # Aggregating the embeddings along the sequence length
+                vqa_output_embed_agg = torch.stack([torch.mean(embed, dim=0) if embed.numel() > 0 else torch.zeros(embed.size(1)) for embed in vqa_output_embed])
+                
+                
+                if self.args.debug:
+                    print("vqa_output_embed_agg.shape", vqa_output_embed_agg.shape)
+                    print("choice_embeddings_agg.shape", choice_embeddings_agg.shape)
+                    
+                # Calculate similarity for each instance in the batch considering options
+                most_similar_indices, similarities = self.find_most_similar(vqa_output_embed_agg, choice_embeddings_agg)
 
-        choice_embeddings_agg = torch.stack(choice_embeddings_agg)
-        return choice_embeddings_agg
-
-
-    def filter_and_process_output_tokens(self, vqa_output_tokens: torch.Tensor, vqa_placeholder_mask: torch.Tensor) -> list:
-        for e in vqa_output_tokens:
-            self.debug_print("from filter_and_process_output_tokens, vqa_output_tokens:", self.tokenizer.decode(e.tolist()))
-        filtered_vqa_output_tokens = [tokens[mask] for tokens, mask in zip(vqa_output_tokens[:, 1:], vqa_placeholder_mask)]
-        vqa_output_embed = []
-        for output_tokens in filtered_vqa_output_tokens:
-            eos_index = (output_tokens == self.eos_id).nonzero(as_tuple=True)[0]
-            if eos_index.numel() > 0:
-                output_tokens = output_tokens[:eos_index[0]]
-            self.debug_print("output tokens:", self.tokenizer.decode(output_tokens.tolist()))
-            vqa_output_embed.append(self.tok_embeddings(output_tokens))
-        return vqa_output_embed
-
-    def aggregate_output_embeddings(self, vqa_output_embed: list) -> torch.Tensor:
-        vqa_output_embed_agg = torch.stack([torch.mean(embed, dim=0) if embed.numel() > 0 else torch.zeros(embed.size(1)) for embed in vqa_output_embed])
-        return vqa_output_embed_agg
-
+                return individual_losses, most_similar_indices
+            else: # if not generation task
+                return individual_losses
+        else:
+            return vqa_loss, vaq_loss, qav_loss
+        
     def find_most_similar(self, output_embeddings: torch.Tensor, choice_embeddings: torch.Tensor):
         """
         Find the most similar text for each instance in the batch considering multiple options.
         output_embeddings: Tensor of shape (batch_size, embed_size)
         choice_embeddings: Tensor of shape (batch_size, n_options, embed_size)
-
+        
         Returns:
             max_indices: Tensor of shape (batch_size, ) with each element representing the most similar option to that batch instance
             similarities: Tensor of shape (batch_size, n_options) with each row representing the similarity scores of that batch instance to the other options given for that instance
         """
+        batch_size = output_embeddings.size(0)
 
         # Normalize the embeddings to unit vectors
         output_embeddings_norm = torch.nn.functional.normalize(output_embeddings, p=2, dim=1)

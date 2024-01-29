@@ -3,7 +3,7 @@
 
 from sentencepiece import SentencePieceProcessor
 from logging import getLogger
-from typing import Dict, List
+from typing import List
 import os
 import torch
 from typing import List, Tuple, Dict, Optional
@@ -12,8 +12,9 @@ logger = getLogger()
 
 
 class Tokenizer:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, args=None):
         # reload tokenizer
+        self.args = args
         assert os.path.isfile(model_path), model_path
         self.sp_model = SentencePieceProcessor(model_file=model_path)
         logger.info(f"Reloaded SentencePiece model from {model_path}")
@@ -28,7 +29,7 @@ class Tokenizer:
         self.q_token_id = 16492
         self.a_token_id = 22550
         self.nl_id = 13
-        logger.info(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
+        print(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     def encode(self, s: str, bos: bool, eos: bool) -> List[int]:
@@ -44,121 +45,172 @@ class Tokenizer:
                     max_feats: int = 10,
                     split: str = 'train', 
                     answer_mapping: Optional[Dict[int, str]] = None, 
-                    answer: Optional[int] = None) -> Tuple[List[int], int, int]:
+                    answer: Optional[int] = None,
+                    options: Optional[List[str]] = None) -> Tuple[List[int], int, int]:
+        sys_prompt = "You watch videos first carefully and then answer the given question carefully based on the video that you watched. The answer to the question is contained in the video."
+        user_prompt = "Answer the question based on the video."
+        # i_text = f"<s>[INST] <<SYS>>\n{sys_prompt}\n<</SYS>>\n{user_prompt} [/INST]"'
         i_text = "Instruction: Predict the answer based on the video and question.\n"
-        q_text = text['q_text']
-        o_text = text['o_text']
-        a_text = text['a_text']
-     
-        s1 = i_text + 'Video:'
-        t1 = [self.bos_id] + self.sp_model.encode(s1)
-        video_start = len(t1)
+        if not self.args.is_generation_task:
+            q_text = text['q_text']
+            o_text = text['o_text']
+            a_text = text['a_text']
+        
+            s1 = i_text + 'Video:'
+            t1 = [self.bos_id] + self.sp_model.encode(s1)
+            video_start = len(t1)
 
-        s2 = q_text + o_text + a_text
+            s2 = q_text + o_text + a_text
 
-        if split == 'train':
-            s2 = s2 + answer_mapping[answer] 
-            t2 = self.sp_model.encode(s2) + [self.eos_id]
-            t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
-            prefix_index = t[0].index(self.a_token_id) + 5
+            if split == 'train':
+                s2 = s2 + answer_mapping[answer] 
+                t2 = self.sp_model.encode(s2) + [self.eos_id]
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
+                prefix_index = t[0].index(self.a_token_id) + 5
+            else:
+                t = []
+                for k, v in answer_mapping.items():
+                    t2 = self.sp_model.encode(s2 + v) + [self.eos_id]
+                    t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
+                prefix_index = t[answer].index(self.a_token_id) + 5
+            return t, prefix_index, video_start
+        
         else:
-            t = []
-            for k, v in answer_mapping.items():
-                t2 = self.sp_model.encode(s2 + v) + [self.eos_id]
-                t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
-            prefix_index = t[answer].index(self.a_token_id) + 5
-        return t, prefix_index, video_start
-    
+            q_text = text['q_text']
+            a_text = text['a_text']
+
+            s1 = i_text + 'Video:'
+            t1 = [self.bos_id] + self.sp_model.encode(s1)
+            video_start = len(t1)
+
+            s2 = q_text + a_text
+
+            if split == "train":
+                s2 += options[answer]
+                t2 = self.sp_model.encode(s2) + [self.eos_id]
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
+                prefix_index = t[0].index(self.a_token_id) + 5
+            else:
+                t = []
+                for option in options:
+                    temp_s2 = s2 + option
+                    t2 = self.sp_model.encode(temp_s2) + [self.eos_id]
+                    t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
+                prefix_index = t[answer].index(self.a_token_id) + 5
+            return t, prefix_index, video_start
+
+
     def encode_vaq(self, text: Optional[Dict[str, str]] = None,
                 max_feats: int = 10,
                 split: str = 'train', 
                 answer_mapping: Optional[Dict[int, str]] = None, 
                 answer: Optional[int] = None,
-                verbose_print=False) -> Tuple[List[int], int, int]:
-        
-        if verbose_print:
-            # Phrases to be tokenized and encoded
-            phrases = ["Instruction:", "Question:","\nQuestion:", "Video:", "Answer:", "answer:", "Choices:", "video", 
-                    "The answer is", ":", "A", "B", "C", "D", "E", "(A)", "(B)", "(C)", "(D)", "(E)", "(", ")"]
-
-            # Printing the tokenized and encoded versions of the phrases
-            print("\nTokenized and Encoded Phrases:")
-            for phrase in phrases:
-                encoded_phrase = self.sp_model.encode(phrase)
-                print(f"'{phrase}': {encoded_phrase}")
-        
+                options: Optional[List[str]] = None) -> Tuple[List[int], int, int]:
         i_text = "Instruction: Predict the question based on the video and answer.\n"
-        q_text = text['q_text'].strip()
-        o_text = text['o_text']
-        a_text = text['a_text']
-
-        if verbose_print:
-            print("Original Texts:")
-            print("Instruction Text:", i_text)
-            print("Q Text:", q_text)
-            print("O Text:", o_text)
-            print("A Text:", a_text)
-
-        s1 = i_text + 'Video:'
-        t1 = [self.bos_id] + self.sp_model.encode(s1)
-        video_start = len(t1)
-
-        if verbose_print:
-            print("\nAfter initial encoding:")
-            print("Encoded S1 (Initial part):", s1, "=>", t1)
-
-        s2 = o_text + a_text
-
-        if split == 'train':
-            s2 = s2 + answer_mapping[answer] + "\n" + q_text
-            t2 = self.sp_model.encode(s2) + [self.eos_id]
-            t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
-            prefix_index = t[0].index(self.q_token_id) + 2
-
-            if verbose_print:
-                print("\nEncoded S2 (Train Split):", s2, "=>", t2)
-                print("Final Token Sequence (Train):", t)
-        else:
-            t = []
-            for k, v in answer_mapping.items():
-                temp_s2 = s2 + v + "\n" + q_text
-                t2 = self.sp_model.encode(temp_s2) + [self.eos_id]
-                t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
-
-                if verbose_print:
-                    print("\nEncoded S2 (Other Split):", temp_s2, "=>", t2)
-                    print("Final Token Sequence (Other):", t[-1])
-
-            prefix_index = t[answer].index(self.q_token_id) + 2
-
-        if verbose_print:
-            print("Prefix Index:", prefix_index)
-            print("Video Start:", video_start)
-
-        return t, prefix_index, video_start
-
-
-    
-    def encode_qav(self, text: Optional[Dict[str, str]] = None, max_feats: int = 10, split: str = 'train', answer_mapping: Optional[Dict[int, str]] = None, answer: Optional[int] = None) -> Tuple[List[int], int]:
-        i_text = "Instruction: Predict the video based on the question and answer.\n"
-        q_text = text['q_text']
-        o_text = text['o_text']
-        a_text = text['a_text']
-        
-        s1 = i_text + q_text + o_text + a_text
-        
-        if split == 'train':
-            s1 = s1 + answer_mapping[answer] + "\n" + "Video:"
+        if not self.args.is_generation_task:
+            q_text = text['q_text'].strip()
+            o_text = text['o_text']
+            a_text = text['a_text']
+            
+            s1 = i_text + 'Video:'
             t1 = [self.bos_id] + self.sp_model.encode(s1)
-            t = [t1 + [-2 for _ in range(max_feats)] + [self.eos_id]]
-            prefix_index = t[0].index(self.v_token_id) + 2
+            video_start = len(t1)
+            
+            s2 = o_text + a_text
+            
+            if split == 'train':
+                s2 = s2 + answer_mapping[answer] + "\n" + q_text
+                t2 = self.sp_model.encode(s2) + [self.eos_id]
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
+                prefix_index = t[0].index(self.q_token_id) + 2
+            else:
+                t = []
+                for k, v in answer_mapping.items():
+                    t2 = self.sp_model.encode(s2 + v + "\n" + q_text) + [self.eos_id]
+                    t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
+                prefix_index = t[answer].index(self.q_token_id) + 2
+            return t, prefix_index, video_start
         else:
-            t = []
-            for k, v in answer_mapping.items():
-                t1 = [self.bos_id] + self.sp_model.encode(s1 + v + "\n" + "Video:") + [-2 for _ in range(max_feats)] + [self.eos_id]
-                t.append(t1)
-            prefix_index = t[answer].index(self.v_token_id) + 2
-        return t, prefix_index
+            q_text = text['q_text'].strip()
+            a_text = text['a_text']
+
+            s1 = i_text + 'Video:'
+            t1 = [self.bos_id] + self.sp_model.encode(s1)
+            video_start = len(t1)
+
+            s2 = "\n" + a_text
+
+            if split == 'train':
+                s2 += options[answer] + "\n" + q_text
+                t2 = self.sp_model.encode(s2) + [self.eos_id]
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2]
+                if self.args.debug:
+                    print("First Token Sequence (Generation - VAQ):", t[0])
+                    print("First Token Sequence (Generation - VAQ) decoded:", self.decode([item if item>=0 else 0 for item in t[0]]))
+                    print("Final Token Sequence (Generation - VAQ):", t[-1])
+                    # print("Final Token Sequence (Generation - VAQ) decoded:", self.decode(t[-1]))
+                prefix_index = t[0].index(self.q_token_id) + 2
+            else:
+                t = []
+                for option in options:
+                    temp_s2 = s2 + option + "\n" + q_text
+                    t2 = self.sp_model.encode(temp_s2) + [self.eos_id]
+                    t.append(t1 + [-2 for _ in range(max_feats)] + [self.nl_id] + t2)
+                    if self.args.debug:
+                        print("\nEncoded S2 (Generation Task - VAQ):", temp_s2, "=>", t2)
+                        print("Final Token Sequence (Generation - VAQ):", t[-1])
+                    prefix_index = t[0].index(self.q_token_id) + 2
+            return t, prefix_index, video_start
+    
+    def encode_qav(self, 
+                   text: Optional[Dict[str, str]] = None, 
+                   max_feats: int = 10, split: str = 'train', 
+                   answer_mapping: Optional[Dict[int, str]] = None, 
+                   answer: Optional[int] = None,
+                   options: Optional[List[str]] = None) -> Tuple[List[int], int]:
+        i_text = "Instruction: Predict the video based on the question and answer.\n"
+        if not self.args.is_generation_task:
+            q_text = text['q_text']
+            o_text = text['o_text']
+            a_text = text['a_text']
+            
+            s1 = i_text + q_text + o_text + a_text
+            
+            if split == 'train':
+                s1 = s1 + answer_mapping[answer] + "\n" + "Video:"
+                t1 = [self.bos_id] + self.sp_model.encode(s1)
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.eos_id]]
+                prefix_index = t[0].index(self.v_token_id) + 2
+            else:
+                t = []
+                for k, v in answer_mapping.items():
+                    t1 = [self.bos_id] + self.sp_model.encode(s1 + v + "\n" + "Video:") + [-2 for _ in range(max_feats)] + [self.eos_id]
+                    t.append(t1)
+                prefix_index = t[answer].index(self.v_token_id) + 2
+            return t, prefix_index
+        else:
+            q_text = text['q_text']
+            o_text = text['o_text']
+            a_text = text['a_text']
+
+            s1 = i_text + q_text + a_text
+
+            if split == "train":
+                s1 += options[answer] + "\n" + "Video:"
+                t1 = [self.bos_id] + self.sp_model.encode(s1)
+                t = [t1 + [-2 for _ in range(max_feats)] + [self.eos_id]]
+                prefix_index = t[0].index(self.v_token_id) + 2
+            
+            else:
+                t = []
+                for option in options:
+                    temp_s2 = s1 + option + "\n" + "Video:"
+                    t1 = [self.bos_id] + self.sp_model.encode(temp_s2) + [-2 for _ in range(max_feats)] + [self.eos_id]
+                    t.append(t1)
+                prefix_index = t[answer].index(self.v_token_id) + 2
+            return t, prefix_index
+
+
 
     def decode(self, t: List[int]) -> str:
         return self.sp_model.decode(t)
